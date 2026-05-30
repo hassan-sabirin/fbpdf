@@ -63,7 +63,7 @@ int doc_pages(struct doc *doc)
 	return doc->doc->pages();
 }
 
-struct doc *doc_open(char *path)
+struct doc *doc_open(const char *path)
 {
 	struct doc *doc = (struct doc *) malloc(sizeof(*doc));
 	if (doc == NULL)
@@ -80,4 +80,24 @@ void doc_close(struct doc *doc)
 {
 	delete doc->doc;
 	free(doc);
+}
+
+int doc_search(struct doc *doc, const char *keyword, int start_page)
+{
+	int pages = doc->doc->pages();
+	int p;
+	poppler::ustring ukey = poppler::ustring::from_latin1(keyword,
+							      strlen(keyword));
+	for (p = start_page; p <= pages; p++) {
+		poppler::page *pg = doc->doc->create_page(p - 1);
+		if (!pg)
+			continue;
+		std::vector<poppler::rectangle> hits =
+			pg->search(ukey, poppler::page::search_flags(
+				poppler::page::ignore_case));
+		delete pg;
+		if (!hits.empty())
+			return p;
+	}
+	return 0;
 }

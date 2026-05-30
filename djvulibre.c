@@ -1,7 +1,9 @@
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <libdjvu/ddjvuapi.h>
+#include <libdjvu/miniexp.h>
 #include "doc.h"
 
 #define MIN(a, b)	((a) < (b) ? (a) : (b))
@@ -88,7 +90,7 @@ int doc_pages(struct doc *doc)
 	return ddjvu_document_get_pagenum(doc->doc);
 }
 
-struct doc *doc_open(char *path)
+struct doc *doc_open(const char *path)
 {
 	struct doc *doc = malloc(sizeof(*doc));
 	doc->ctx = ddjvu_context_create("fbpdf");
@@ -109,8 +111,60 @@ fail:
 void doc_close(struct doc *doc)
 {
 	if (doc->doc)
-		ddjvu_context_release(doc->ctx);
-	if (doc->ctx)
 		ddjvu_document_release(doc->doc);
+	if (doc->ctx)
+		ddjvu_context_release(doc->ctx);
 	free(doc);
+}
+
+/*
+ * Recursively walk a miniexp page-text s-expression looking for a string
+ * that contains keyword (case-insensitive).  Returns 1 if found.
+ */
+static int miniexp_search(miniexp_t expr, const char *keyword)
+{
+	if (miniexp_stringp(expr)) {
+		const char *s = miniexp_to_str(expr);
+		/* Case-insensitive substring search. */
+		int klen = strlen(keyword);
+		int slen = strlen(s);
+		int i, j;
+		for (i = 0; i <= slen - klen; i++) {
+			for (j = 0; j < klen; j++)
+				if (tolower((unsigned char)s[i + j]) !=
+				    tolower((unsigned char)keyword[j]))
+					break;
+			if (j == klen)
+				return 1;
+		}
+		return 0;
+	}
+	if (miniexp_listp(expr) && expr != miniexp_nil) {
+		miniexp_t p;
+		for (p = expr; p != miniexp_nil; p = miniexp_cdr(p))
+			if (miniexp_search(miniexp_car(p), keyword))
+				return 1;
+	}
+	return 0;
+}
+
+int doc_search(struct doc *doc, const char *keyword, int start_page)
+{
+	int pages = ddjvu_document_get_pagenum(doc->doc);
+	int p;
+	for (p = start_page; p <= pages; p++) {
+		miniexp_t pagetext;
+		/* Pump the message queue until the page text is ready. */
+		while ((pagetext = ddjvu_document_get_pagetext(doc->doc,
+				p - 1, "word")) == miniexp_dummy)
+			djvu_handle(doc);
+		if (pagetext == miniexp_nil)
+			continue;
+		if (miniexp_search(pagetext, keyword)) {
+			miniexp_release(pagetext);
+			return p;
+		}
+		miniexp_release(pagetext);
+	}
+	return 0;
 }

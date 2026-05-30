@@ -107,6 +107,10 @@ int fb_init(char *dev)
 	if (fb == MAP_FAILED)
 		goto failed;
 	init_colors();
+	if (xres <= 0 || xres > (int)vinfo.xres) xres = 0;
+	if (yres <= 0 || yres > (int)vinfo.yres) yres = 0;
+	if (xoff < 0 || xoff >= (int)vinfo.xres) xoff = 0;
+	if (yoff < 0 || yoff >= (int)vinfo.yres) yoff = 0;
 	fb_cmap_save(1);
 	fb_cmap();
 	return 0;
