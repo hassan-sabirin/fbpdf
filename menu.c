@@ -508,8 +508,18 @@ void menu_init(void)
 	 * REPORT_MOUSE_POSITION delivers motion events while button-1 is
 	 * held, enabling drag-to-pan.
 	 */
+	/*
+	 * Use mouseinterval(0) to suppress ncurses' click synthesis — without
+	 * it, a single physical click generates both BUTTON1_PRESSED and a
+	 * synthesized BUTTON1_CLICKED, causing every click to be processed
+	 * twice and corrupting the window list (double delwin).
+	 * With mouseinterval(0), ncurses delivers only BUTTON1_PRESSED +
+	 * BUTTON1_RELEASED. GPM delivers BUTTON1_CLICKED directly (no
+	 * synthesis) so it continues to work correctly.
+	 */
+	mouseinterval(0);
 	mousemask(BUTTON1_PRESSED | BUTTON1_RELEASED |
-	          BUTTON1_DOUBLE_CLICKED | BUTTON2_PRESSED |
+	          BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED | BUTTON2_PRESSED |
 	          BUTTON4_PRESSED | BUTTON5_PRESSED |
 	          REPORT_MOUSE_POSITION, NULL);
 }
