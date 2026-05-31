@@ -509,9 +509,19 @@ static void mainloop(void)
 	draw();
 	updatestatus();
 
-	while ((c = menu_readkey()) != -1) {
+	while (1) {
 		int action;
 		MenuMouse mm;
+
+		/*
+		 * Erase GPM cursor sprite: GPM draws its cursor into the
+		 * framebuffer while we block.  Redraw before blocking so the
+		 * cursor position from the previous event is always overwritten.
+		 */
+		draw();
+
+		c = menu_readkey();
+		if (c == -1) break;
 
 		/* Let the menu layer intercept F10 and all mouse events. */
 		action = menu_handle_key(c, buf, sizeof(buf), &mm);
