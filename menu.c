@@ -226,7 +226,6 @@ static int dropdown_run(const Menu *m, int sel)
 	win = newwin(h, w, DROPDOWN_ROW, dcol);
 	if (!win)
 		return MENU_NONE;
-	keypad(win, TRUE);
 	clearok(win, TRUE);
 	box(win, 0, 0);
 
@@ -240,7 +239,10 @@ static int dropdown_run(const Menu *m, int sel)
 		}
 		wrefresh(win);
 
-		c = wgetch(win);
+		/* Read from stdscr — mouse events are always queued there,
+		 * not on subwindows. Using wgetch(win) can deliver KEY_MOUSE
+		 * but leave getmouse() returning stale data. */
+		c = getch();
 		switch (c) {
 		case KEY_UP:
 			sel = (sel + m->nitems - 1) % m->nitems;
@@ -334,12 +336,17 @@ static int input_dialog(const char *prompt, char *buf, int bufsz)
 	curs_set(1);
 	box(win, 0, 0);
 	mvwprintw(win, 1, 1, "%s", prompt);
+	/* Position cursor inside the dialog window for echo. */
+	wmove(win, 1, 1 + (int)strlen(prompt));
 	wrefresh(win);
 
 	buf[0] = '\0';
 	len = 0;
 
 	while (1) {
+		/* wgetch on the dialog window is correct here — echo needs the
+		 * cursor positioned inside win, and text input has no KEY_MOUSE
+		 * ambiguity. */
 		ch = wgetch(win);
 		if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
 			buf[len] = '\0';
