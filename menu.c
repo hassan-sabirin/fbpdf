@@ -557,9 +557,12 @@ int menu_handle_key(int key, char *buf, int bufsz, MenuMouse *mm)
 		if (ev.bstate & BUTTON1_PRESSED)   return MENU_MOUSE_PRESS;
 		if (ev.bstate & BUTTON1_RELEASED)  return MENU_MOUSE_RELEASE;
 		if (ev.bstate & BUTTON1_DOUBLE_CLICKED) return MENU_MOUSE_ZOOM_IN;
-		if (ev.bstate == REPORT_MOUSE_POSITION ||
+		if (ev.bstate & REPORT_MOUSE_POSITION ||
 		    (ev.bstate & BUTTON1_PRESSED))
 			return MENU_MOUSE_DRAG;
+		/* Any other mouse event in the document area (e.g. bare GPM motion
+		 * with bstate==0) still needs a redraw to erase the cursor trail. */
+		return MENU_MOUSE_DRAG;
 	}
 	return MENU_NONE;
 }

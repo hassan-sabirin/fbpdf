@@ -267,6 +267,28 @@ static int cells_to_px_col(int dcells)
 	return dcells * scols / tcols;
 }
 
+/*
+ * Apply a screen-space delta (dsr = screen rows down, dsc = screen cols right)
+ * to srow/scol, accounting for page rotation.
+ *
+ * mupdf/poppler rotate the rendered buffer so that the page's natural "down"
+ * axis maps to screen directions as follows:
+ *   rotate=0:   page-down  == screen-down  (srow+), page-right == screen-right
+ *   rotate=90:  page-down  == screen-right (scol+), page-right == screen-up
+ *   rotate=180: page-down  == screen-up    (srow-), page-right == screen-left
+ *   rotate=270: page-down  == screen-left  (scol-), page-right == screen-down
+ */
+static void pan_by(int dsr, int dsc)
+{
+	switch ((rotate / 90) % 4) {
+	default:
+	case 0: srow += dsr; scol += dsc; break;
+	case 1: srow += dsc; scol -= dsr; break;
+	case 2: srow -= dsr; scol -= dsc; break;
+	case 3: srow -= dsc; scol += dsr; break;
+	}
+}
+
 static void clamp_position(void)
 {
 	srow = MAX(prow - srows + MARGIN, MIN(prow + prows - MARGIN, srow));
@@ -374,9 +396,8 @@ static int handle_action(int action, char *buf, MenuMouse *mm)
 		break;
 	case MENU_SCROLL_UP: {
 		int step = srows / PAGESTEPS;
-		srow -= step;
+		pan_by(-step, 0);
 		clamp_position();
-		/* If we've hit the top edge, go to the previous page. */
 		if (srow <= prow - srows + MARGIN && num > 1) {
 			if (!loadpage(num - 1))
 				srow = prow + prows - srows;
@@ -387,9 +408,8 @@ static int handle_action(int action, char *buf, MenuMouse *mm)
 	}
 	case MENU_SCROLL_DOWN: {
 		int step = srows / PAGESTEPS;
-		srow += step;
+		pan_by(step, 0);
 		clamp_position();
-		/* If we've hit the bottom edge, go to the next page. */
 		if (srow >= prow + prows - MARGIN && num < doc_pages(doc)) {
 			if (!loadpage(num + 1))
 				srow = prow;
@@ -436,17 +456,23 @@ static int handle_action(int action, char *buf, MenuMouse *mm)
 		break;
 	case MENU_MOUSE_DRAG:
 		if (drag_active && mm) {
-			srow = drag_srow - cells_to_px_row(mm->row - drag_trow);
-			scol = drag_scol - cells_to_px_col(mm->col - drag_tcol);
+			int dsr = cells_to_px_row(mm->row - drag_trow);
+			int dsc = cells_to_px_col(mm->col - drag_tcol);
+			srow = drag_srow;
+			scol = drag_scol;
+			pan_by(-dsr, -dsc);
 			clamp_position();
-			draw();
-			/* Skip status update during drag to avoid flicker. */
 		}
+		/* Redraw unconditionally to erase the GPM cursor trail. */
+		draw();
 		break;
 	case MENU_MOUSE_RELEASE:
 		if (drag_active && mm) {
-			srow = drag_srow - cells_to_px_row(mm->row - drag_trow);
-			scol = drag_scol - cells_to_px_col(mm->col - drag_tcol);
+			int dsr = cells_to_px_row(mm->row - drag_trow);
+			int dsc = cells_to_px_col(mm->col - drag_tcol);
+			srow = drag_srow;
+			scol = drag_scol;
+			pan_by(-dsr, -dsc);
 			clamp_position();
 			draw();
 			updatestatus();
@@ -572,16 +598,16 @@ static void mainloop(void)
 			jmpmark(menu_readkey(), c == '`');
 			break;
 		case 'j':
-			srow += step * getcount(1);
+			pan_by(step * getcount(1), 0);
 			break;
 		case 'k':
-			srow -= step * getcount(1);
+			pan_by(-step * getcount(1), 0);
 			break;
 		case 'l':
-			scol += hstep * getcount(1);
+			pan_by(0, hstep * getcount(1));
 			break;
 		case 'h':
-			scol -= hstep * getcount(1);
+			pan_by(0, -hstep * getcount(1));
 			break;
 		case 'H':
 			srow = prow;
@@ -597,11 +623,11 @@ static void mainloop(void)
 			break;
 		case ' ':
 		case CTRLKEY('d'):
-			srow += srows * getcount(1) - step;
+			pan_by(srows * getcount(1) - step, 0);
 			break;
 		case 127:
 		case CTRLKEY('u'):
-			srow -= srows * getcount(1) - step;
+			pan_by(-(srows * getcount(1) - step), 0);
 			break;
 		case '[':
 			scol = pcol;
