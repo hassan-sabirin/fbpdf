@@ -12,42 +12,30 @@
 #define NAV_COL		13	/* column where nav buttons start (after menus) */
 
 /*
- * ncurses owns a narrow band at the top of the terminal.  We keep a
- * persistent overlay window (s_win) sized to exactly the rows currently
- * in use.  When no menu is active it is 1 row tall (just the status bar).
- * While a dropdown or dialog is visible it grows to cover those rows too.
+ * ncurses owns a narrow band at the top of the terminal.  s_win is a pad
+ * (newpad) sized to the full terminal dimensions.  pnoutrefresh flushes
+ * only the rows currently in use, so ncurses never writes to the PDF area.
  *
- * Keeping a fixed-size window and resizing it (via wresize) is simpler than
- * creating/destroying windows, and avoids the delwin-after-framebuffer-write
- * crash that plagued the previous newwin/delwin approach.
+ * Using a pad avoids newwin/delwin/wresize entirely — it is created once in
+ * menu_init and destroyed once in menu_cleanup, so framebuffer-write timing
+ * can never corrupt its state.
  *
- * Input is always read via wgetch(stdscr) so KEY_MOUSE events, which ncurses
- * queues on stdscr, are never missed.
+ * s_active_rows controls how many rows are flushed: 1 normally (status bar),
+ * more while a dropdown or dialog is open.
+ *
+ * Input always via wgetch(stdscr) so KEY_MOUSE events are never missed.
  */
-#define MENU_ROWS_IDLE	1	/* rows owned when no dropdown is open */
+#define MENU_ROWS_IDLE	1
 
-static WINDOW *s_win;		/* the persistent overlay window */
-static int     s_win_rows;	/* current height of s_win */
+static WINDOW *s_win;		/* pad covering the full terminal */
+static int     s_active_rows;	/* rows to flush to screen */
 
-/* Recreate s_win to cover exactly `rows` rows. */
-static void win_resize(int rows)
-{
-	int cols = getmaxx(stdscr);
-	if (rows < 1) rows = 1;
-	if (cols < 1) cols = 1;
-	if (rows == s_win_rows && s_win) return;
-	if (s_win) { delwin(s_win); s_win = NULL; }
-	s_win = newwin(rows, cols, 0, 0);
-	s_win_rows = rows;
-}
-
-/* Flush only s_win to the terminal — stdscr is never refreshed. */
+/* Flush the top s_active_rows of the pad to the screen. */
 static void win_flush(void)
 {
-	if (s_win) {
-		wnoutrefresh(s_win);
-		doupdate();
-	}
+	if (!s_win) return;
+	pnoutrefresh(s_win, 0, 0, 0, 0, s_active_rows - 1, COLS - 1);
+	doupdate();
 }
 
 /* -------------------------------------------------------------------------
@@ -223,7 +211,7 @@ static int dropdown_run(const Menu *m, int sel)
 		return MENU_NONE;
 
 	/* Grow s_win to cover the status bar + dropdown rows. */
-	win_resize(DROPDOWN_ROW + h);
+	s_active_rows = DROPDOWN_ROW + h;
 
 	while (1) {
 		bar_draw(-1);
@@ -258,23 +246,23 @@ static int dropdown_run(const Menu *m, int sel)
 			sel = (sel + 1) % m->nitems;
 			break;
 		case '\n': case '\r': case KEY_ENTER:
-			win_resize(MENU_ROWS_IDLE);
+			s_active_rows = MENU_ROWS_IDLE;
 			return m->items[sel].action;
 		case KEY_LEFT:
-			win_resize(MENU_ROWS_IDLE);
+			s_active_rows = MENU_ROWS_IDLE;
 			return -KEY_LEFT;
 		case KEY_RIGHT:
-			win_resize(MENU_ROWS_IDLE);
+			s_active_rows = MENU_ROWS_IDLE;
 			return -KEY_RIGHT;
 		case 27:
-			win_resize(MENU_ROWS_IDLE);
+			s_active_rows = MENU_ROWS_IDLE;
 			return MENU_NONE;
 		case KEY_MOUSE: {
 			MEVENT ev;
 			if (getmouse(&ev) != OK) break;
 			if (ev.y == STATUSBAR_ROW && (ev.bstate & BUTTON1_PRESSED)) {
 				int hit = bar_hit(ev.x);
-				win_resize(MENU_ROWS_IDLE);
+				s_active_rows = MENU_ROWS_IDLE;
 				if (hit >= 0 && hit != (int)(m - menus))
 					return -(KEY_RIGHT * 100 + hit);
 				return MENU_NONE;
@@ -285,11 +273,11 @@ static int dropdown_run(const Menu *m, int sel)
 				    item >= 0 && item < m->nitems) {
 					sel = item;
 					if (ev.bstate & BUTTON1_DOUBLE_CLICKED) {
-						win_resize(MENU_ROWS_IDLE);
+						s_active_rows = MENU_ROWS_IDLE;
 						return m->items[sel].action;
 					}
 				} else if (ev.y > STATUSBAR_ROW) {
-					win_resize(MENU_ROWS_IDLE);
+					s_active_rows = MENU_ROWS_IDLE;
 					return MENU_NONE;
 				}
 			}
@@ -324,7 +312,7 @@ static int input_dialog(const char *prompt, char *buf, int bufsz)
 	dc = (scr_cols - w) / 2;
 
 	/* Grow s_win to reach the bottom of the dialog box. */
-	win_resize(dr + h);
+	s_active_rows = dr + h;
 
 	echo();
 	curs_set(1);
@@ -366,7 +354,7 @@ static int input_dialog(const char *prompt, char *buf, int bufsz)
 
 	noecho();
 	curs_set(0);
-	win_resize(MENU_ROWS_IDLE);
+	s_active_rows = MENU_ROWS_IDLE;
 	return len > 0;
 }
 
@@ -490,7 +478,9 @@ void menu_init(void)
 	          REPORT_MOUSE_POSITION, NULL);
 
 	nav_layout();
-	win_resize(MENU_ROWS_IDLE);
+	s_active_rows = MENU_ROWS_IDLE;
+	/* Pad covers the full terminal; pnoutrefresh limits what reaches screen. */
+	s_win = newpad(LINES, COLS);
 }
 
 void menu_cleanup(void)
