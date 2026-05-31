@@ -209,13 +209,17 @@ static int dropdown_width(const Menu *m)
  * Show a drop-down for menu m, pre-selecting item sel.
  * Returns the chosen action, or MENU_NONE if cancelled.
  * Returns -KEY_LEFT / -KEY_RIGHT to signal switching to adjacent menu.
+ *
+ * Draws directly onto stdscr to avoid newwin/delwin — on a Linux
+ * framebuffer console, direct mmap writes leave ncurses' window-list
+ * state inconsistent, and delwin() on a WINDOW created after such writes
+ * can corrupt internal ncurses structures and segfault.
  */
 static int dropdown_run(const Menu *m, int sel)
 {
 	int w = dropdown_width(m);
 	int h = m->nitems + 2;	/* border top + items + border bottom */
 	int dcol = m->col;
-	WINDOW *win;
 	int i, c;
 
 	/* Guard against zero/negative terminal dimensions (can happen on a
@@ -223,25 +227,39 @@ static int dropdown_run(const Menu *m, int sel)
 	if (LINES < DROPDOWN_ROW + h || COLS < dcol + w)
 		return MENU_NONE;
 
-	win = newwin(h, w, DROPDOWN_ROW, dcol);
-	if (!win)
-		return MENU_NONE;
-	clearok(win, TRUE);
-	box(win, 0, 0);
+	/* Force full repaint of stdscr before drawing the dropdown.
+	 * Direct framebuffer writes leave ncurses' screen model stale. */
+	clearok(stdscr, TRUE);
 
 	while (1) {
+		/* Redraw the bar and then paint the dropdown over it on stdscr. */
+		bar_draw(-1);
+		/* Top border */
+		move(DROPDOWN_ROW, dcol);
+		addch(ACS_ULCORNER);
+		for (i = 1; i < w - 1; i++) addch(ACS_HLINE);
+		addch(ACS_URCORNER);
+		/* Items */
 		for (i = 0; i < m->nitems; i++) {
-			if (i == sel)
-				wattron(win, A_REVERSE);
-			mvwprintw(win, i + 1, 1, "%s", m->items[i].label);
-			if (i == sel)
-				wattroff(win, A_REVERSE);
+			move(DROPDOWN_ROW + 1 + i, dcol);
+			addch(ACS_VLINE);
+			if (i == sel) attron(A_REVERSE);
+			printw("%s", m->items[i].label);
+			if (i == sel) attroff(A_REVERSE);
+			/* pad to width */
+			{
+				int cur = (int)strlen(m->items[i].label) + 1;
+				while (cur < w - 1) { addch(' '); cur++; }
+			}
+			addch(ACS_VLINE);
 		}
-		wrefresh(win);
+		/* Bottom border */
+		move(DROPDOWN_ROW + h - 1, dcol);
+		addch(ACS_LLCORNER);
+		for (i = 1; i < w - 1; i++) addch(ACS_HLINE);
+		addch(ACS_LRCORNER);
+		refresh();
 
-		/* Read from stdscr — mouse events are always queued there,
-		 * not on subwindows. Using wgetch(win) can deliver KEY_MOUSE
-		 * but leave getmouse() returning stale data. */
 		c = getch();
 		switch (c) {
 		case KEY_UP:
@@ -251,16 +269,12 @@ static int dropdown_run(const Menu *m, int sel)
 			sel = (sel + 1) % m->nitems;
 			break;
 		case '\n': case '\r': case KEY_ENTER:
-			delwin(win);
 			return m->items[sel].action;
 		case KEY_LEFT:
-			delwin(win);
 			return -KEY_LEFT;
 		case KEY_RIGHT:
-			delwin(win);
 			return -KEY_RIGHT;
 		case 27:
-			delwin(win);
 			return MENU_NONE;
 		case KEY_MOUSE: {
 			MEVENT ev;
@@ -270,9 +284,7 @@ static int dropdown_run(const Menu *m, int sel)
 			if (ev.y == STATUSBAR_ROW &&
 			    (ev.bstate & BUTTON1_PRESSED)) {
 				int hit = bar_hit(ev.x);
-				delwin(win);
 				if (hit >= 0 && hit != (int)(m - menus))
-					/* Signal the caller to open that menu. */
 					return -(KEY_RIGHT * 100 + hit);
 				return MENU_NONE;
 			}
@@ -282,10 +294,8 @@ static int dropdown_run(const Menu *m, int sel)
 				if (ev.x >= dcol && ev.x < dcol + w &&
 				    item >= 0 && item < m->nitems) {
 					sel = item;
-					if (ev.bstate & BUTTON1_DOUBLE_CLICKED) {
-						delwin(win);
+					if (ev.bstate & BUTTON1_DOUBLE_CLICKED)
 						return m->items[sel].action;
-					}
 				}
 			}
 			/* Scroll wheel inside the drop-down moves the highlight. */
@@ -296,10 +306,8 @@ static int dropdown_run(const Menu *m, int sel)
 			/* Click outside the menu area entirely — close. */
 			if ((ev.bstate & BUTTON1_PRESSED) &&
 			    ev.y > STATUSBAR_ROW &&
-			    (ev.x < dcol || ev.x >= dcol + w)) {
-				delwin(win);
+			    (ev.x < dcol || ev.x >= dcol + w))
 				return MENU_NONE;
-			}
 			break;
 		}
 		default:
@@ -311,43 +319,56 @@ static int dropdown_run(const Menu *m, int sel)
 /*
  * Prompt the user for a single line of text.
  * Returns 1 if confirmed, 0 if cancelled.
+ *
+ * Draws directly onto stdscr to avoid newwin/delwin (same reason as
+ * dropdown_run: delwin is unsafe after direct framebuffer mmap writes).
  */
 static int input_dialog(const char *prompt, char *buf, int bufsz)
 {
 	int rows, cols;
-	int w, h, r, c;
-	WINDOW *win;
-	int ch, len;
+	int w, h, dr, dc;
+	int ch, len, i;
+	int plen;
 
 	getmaxyx(stdscr, rows, cols);
-	w = (int)strlen(prompt) + bufsz + 4;
+	plen = (int)strlen(prompt);
+	w = plen + bufsz + 4;
 	if (w > cols - 4)
 		w = cols - 4;
 	h = 3;
-	r = rows / 2 - 1;
-	c = (cols - w) / 2;
+	dr = rows / 2 - 1;
+	dc = (cols - w) / 2;
 
-	win = newwin(h, w, r, c);
-	if (!win)
-		return 0;
-	keypad(win, TRUE);
-	clearok(win, TRUE);
+	/* Force full repaint so framebuffer writes don't leave stale state. */
+	clearok(stdscr, TRUE);
 	echo();
 	curs_set(1);
-	box(win, 0, 0);
-	mvwprintw(win, 1, 1, "%s", prompt);
-	/* Position cursor inside the dialog window for echo. */
-	wmove(win, 1, 1 + (int)strlen(prompt));
-	wrefresh(win);
 
 	buf[0] = '\0';
 	len = 0;
 
 	while (1) {
-		/* wgetch on the dialog window is correct here — echo needs the
-		 * cursor positioned inside win, and text input has no KEY_MOUSE
-		 * ambiguity. */
-		ch = wgetch(win);
+		/* Draw dialog box on stdscr each iteration. */
+		move(dr, dc);
+		addch(ACS_ULCORNER);
+		for (i = 1; i < w - 1; i++) addch(ACS_HLINE);
+		addch(ACS_URCORNER);
+
+		move(dr + 1, dc);
+		addch(ACS_VLINE);
+		printw(" %s%-*s", prompt, w - plen - 3, buf);
+		addch(ACS_VLINE);
+
+		move(dr + 2, dc);
+		addch(ACS_LLCORNER);
+		for (i = 1; i < w - 1; i++) addch(ACS_HLINE);
+		addch(ACS_LRCORNER);
+
+		/* Position cursor after prompt + current input. */
+		move(dr + 1, dc + 1 + plen + 1 + len);
+		refresh();
+
+		ch = getch();
 		if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
 			buf[len] = '\0';
 			break;
@@ -360,22 +381,14 @@ static int input_dialog(const char *prompt, char *buf, int bufsz)
 		if ((ch == KEY_BACKSPACE || ch == 127 || ch == '\b') && len > 0) {
 			len--;
 			buf[len] = '\0';
-			mvwprintw(win, 1, 1 + (int)strlen(prompt), "%-*s", bufsz - 1, buf);
-			wmove(win, 1, 1 + (int)strlen(prompt) + len);
-			wrefresh(win);
-			continue;
-		}
-		if (ch >= 32 && ch < 127 && len < bufsz - 1) {
+		} else if (ch >= 32 && ch < 127 && len < bufsz - 1) {
 			buf[len++] = (char)ch;
 			buf[len] = '\0';
-			mvwprintw(win, 1, 1 + (int)strlen(prompt), "%s", buf);
-			wrefresh(win);
 		}
 	}
 
 	noecho();
 	curs_set(0);
-	delwin(win);
 	return len > 0;
 }
 
@@ -540,6 +553,10 @@ void menu_statusbar(const char *filename, int page, int pages, int zoom)
 {
 	int cols = getmaxx(stdscr);
 	int changed_pages = (pages != s_pages);
+
+	/* Framebuffer mmap writes leave ncurses' screen model stale.
+	 * Force a full repaint so refresh() doesn't corrupt window state. */
+	clearok(stdscr, TRUE);
 
 	snprintf(s_filename, sizeof(s_filename), "%s", filename);
 	s_page  = page;
