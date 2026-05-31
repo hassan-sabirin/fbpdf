@@ -29,21 +29,16 @@
 static WINDOW *s_win;		/* the persistent overlay window */
 static int     s_win_rows;	/* current height of s_win */
 
-/* Resize (or create) s_win to cover exactly `rows` rows. */
+/* Recreate s_win to cover exactly `rows` rows. */
 static void win_resize(int rows)
 {
 	int cols = getmaxx(stdscr);
 	if (rows < 1) rows = 1;
 	if (cols < 1) cols = 1;
-	if (!s_win) {
-		s_win = newwin(rows, cols, 0, 0);
-		s_win_rows = rows;
-	} else if (rows != s_win_rows) {
-		wresize(s_win, rows, cols);
-		s_win_rows = rows;
-	}
-	if (s_win)
-		keypad(s_win, FALSE);	/* input always via stdscr */
+	if (rows == s_win_rows && s_win) return;
+	if (s_win) { delwin(s_win); s_win = NULL; }
+	s_win = newwin(rows, cols, 0, 0);
+	s_win_rows = rows;
 }
 
 /* Flush only s_win to the terminal — stdscr is never refreshed. */
