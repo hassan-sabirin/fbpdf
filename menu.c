@@ -222,6 +222,7 @@ static int dropdown_run(const Menu *m, int sel)
 	if (!win)
 		return MENU_NONE;
 	keypad(win, TRUE);
+	clearok(win, TRUE);
 	box(win, 0, 0);
 
 	while (1) {
@@ -323,6 +324,7 @@ static int input_dialog(const char *prompt, char *buf, int bufsz)
 	if (!win)
 		return 0;
 	keypad(win, TRUE);
+	clearok(win, TRUE);
 	echo();
 	curs_set(1);
 	box(win, 0, 0);
@@ -399,6 +401,13 @@ static int menubar_run(int start_menu, char *buf, int bufsz)
 	int cur = start_menu;
 	int action;
 
+	/*
+	 * On a framebuffer console, direct mmap writes to /dev/fb0 leave
+	 * ncurses' internal screen model stale.  Force a full repaint so
+	 * subsequent wrefresh() calls don't try to apply a delta against
+	 * a screen image that no longer exists.
+	 */
+	clearok(stdscr, TRUE);
 	bar_draw(cur);
 
 	while (1) {

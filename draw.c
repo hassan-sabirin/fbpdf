@@ -146,3 +146,5 @@ unsigned fb_val(int r, int g, int b)
 {
 	return ((r >> rr) << rl) | ((g >> gr) << gl) | ((b >> br) << bl);
 }
+
+void fb_present(void) {}

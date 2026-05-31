@@ -70,7 +70,11 @@ static int  search_last_page;	/* page of last successful match, or 0 */
 static void draw(void)
 {
 	int i;
-	char *rbuf = malloc(scols * bpp);
+	char *rbuf;
+	void *row;
+	if (!pbuf)
+		return;
+	rbuf = malloc(scols * bpp);
 	if (!rbuf)
 		return;
 	for (i = srow; i < srow + srows; i++) {
@@ -82,19 +86,28 @@ static void draw(void)
 				pbuf + ((i - prow) * pcols + cbeg - pcol) * bpp,
 				(cend - cbeg) * bpp);
 		}
-		memcpy(fb_mem(i - srow), rbuf, scols * bpp);
+		row = fb_mem(i - srow);
+		if (row)
+			memcpy(row, rbuf, scols * bpp);
 	}
 	free(rbuf);
+	fb_present();
 }
 
 static int loadpage(int p)
 {
 	int i;
+	char *newbuf;
+	int newrows = 0, newcols = 0;
 	if (p < 1 || p > doc_pages(doc))
 		return 1;
-	prows = 0;
+	newbuf = doc_draw(doc, p, zoom, rotate, bpp, &newrows, &newcols);
+	if (!newbuf)
+		return 1;
 	free(pbuf);
-	pbuf = doc_draw(doc, p, zoom, rotate, bpp, &prows, &pcols);
+	pbuf  = newbuf;
+	prows = newrows;
+	pcols = newcols;
 	if (invert) {
 		for (i = 0; i < prows * pcols * bpp; i++) {
 			int val = (unsigned char) pbuf[i] ^ 0xff;
@@ -179,10 +192,12 @@ static int opendoc(const char *path)
 static int reload(void)
 {
 	doc_close(doc);
+	doc = NULL;
+	free(pbuf);
+	pbuf = NULL;
 	doc = doc_open(filename);
-	if (!doc || !doc_pages(doc)) {
+	if (!doc || !doc_pages(doc))
 		return 1;
-	}
 	if (!loadpage(num))
 		draw();
 	return 0;
@@ -298,8 +313,7 @@ static int handle_action(int action, char *buf, MenuMouse *mm)
 		if (buf && buf[0]) {
 			if (opendoc(buf)) {
 				/* TODO: show error in status bar */
-			} else {
-				loadpage(1);
+			} else if (!loadpage(1)) {
 				srow = prow;
 				scol = -scols / 2;
 				draw();

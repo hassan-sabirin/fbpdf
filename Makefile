@@ -1,10 +1,10 @@
 PREFIX ?= /usr/local
 CC = cc
-CFLAGS = -Wall -O2
+CFLAGS = -Wall -O2 -g
 LDFLAGS =
 
 # mupdf does not ship a pkg-config file; link its libraries directly.
-MUPDF_LIBS = -lmupdf -lmupdf-third -lmupdf-pkcs7 -lmupdf-threads -lm
+MUPDF_LIBS = -lmupdf -lm #-lmupdf-third -lmupdf-pkcs7 -lmupdf-threads -lm
 
 NCURSES_CFLAGS = $(shell pkg-config --cflags ncursesw)
 NCURSES_LIBS   = $(shell pkg-config --libs   ncursesw)

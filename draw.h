@@ -15,3 +15,9 @@ int fb_rows(void);
 int fb_cols(void);
 void fb_cmap(void);
 unsigned fb_val(int r, int g, int b);
+/*
+ * Present the completed frame to the display.
+ * No-op for the real framebuffer (writes are visible immediately via mmap).
+ * Required for backends that buffer frames (e.g. SDL2).
+ */
+void fb_present(void);
