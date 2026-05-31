@@ -11,6 +11,50 @@
 #define DROPDOWN_ROW	1	/* first row of a drop-down panel */
 #define NAV_COL		13	/* column where nav buttons start (after menus) */
 
+/*
+ * ncurses owns a narrow band at the top of the terminal.  We keep a
+ * persistent overlay window (s_win) sized to exactly the rows currently
+ * in use.  When no menu is active it is 1 row tall (just the status bar).
+ * While a dropdown or dialog is visible it grows to cover those rows too.
+ *
+ * Keeping a fixed-size window and resizing it (via wresize) is simpler than
+ * creating/destroying windows, and avoids the delwin-after-framebuffer-write
+ * crash that plagued the previous newwin/delwin approach.
+ *
+ * Input is always read via wgetch(stdscr) so KEY_MOUSE events, which ncurses
+ * queues on stdscr, are never missed.
+ */
+#define MENU_ROWS_IDLE	1	/* rows owned when no dropdown is open */
+
+static WINDOW *s_win;		/* the persistent overlay window */
+static int     s_win_rows;	/* current height of s_win */
+
+/* Resize (or create) s_win to cover exactly `rows` rows. */
+static void win_resize(int rows)
+{
+	int cols = getmaxx(stdscr);
+	if (rows < 1) rows = 1;
+	if (cols < 1) cols = 1;
+	if (!s_win) {
+		s_win = newwin(rows, cols, 0, 0);
+		s_win_rows = rows;
+	} else if (rows != s_win_rows) {
+		wresize(s_win, rows, cols);
+		s_win_rows = rows;
+	}
+	if (s_win)
+		keypad(s_win, FALSE);	/* input always via stdscr */
+}
+
+/* Flush only s_win to the terminal — stdscr is never refreshed. */
+static void win_flush(void)
+{
+	if (s_win) {
+		wnoutrefresh(s_win);
+		doupdate();
+	}
+}
+
 /* -------------------------------------------------------------------------
  * Module state — kept here so bar_draw and menu_statusbar stay in sync.
  * ---------------------------------------------------------------------- */
@@ -57,35 +101,27 @@ static const Menu menus[] = {
 
 /* -------------------------------------------------------------------------
  * Navigation button layout
- *
- * Rendered as:  |<  <  [N/M]  >  >|
- * Each button has a start column and width tracked in nav_btns[].
  * ---------------------------------------------------------------------- */
 #define NAV_NBTNS	5
 
 typedef struct {
 	int action;
-	int col;	/* filled in by nav_layout() */
-	int width;	/* filled in by nav_layout() */
+	int col;
+	int width;
 } NavBtn;
 
 static NavBtn nav_btns[NAV_NBTNS] = {
 	{ MENU_NAV_FIRST, 0, 0 },
 	{ MENU_NAV_PREV,  0, 0 },
-	{ MENU_NAV_PAGE,  0, 0 },	/* the [N/M] box */
+	{ MENU_NAV_PAGE,  0, 0 },
 	{ MENU_NAV_NEXT,  0, 0 },
 	{ MENU_NAV_LAST,  0, 0 },
 };
 
-/* Labels for the fixed buttons; the page box is rendered dynamically. */
 static const char *nav_labels[NAV_NBTNS] = {
 	"|<", "<", NULL, ">", ">|"
 };
 
-/*
- * Compute nav button column positions from NAV_COL.
- * The page box width varies with page count; call whenever s_pages changes.
- */
 static void nav_layout(void)
 {
 	char pagebuf[32];
@@ -95,52 +131,30 @@ static void nav_layout(void)
 	snprintf(pagebuf, sizeof(pagebuf), "[%d/%d]", s_page, s_pages);
 	pagew = (int)strlen(pagebuf);
 
-	/* |<  (width 2) + space */
-	nav_btns[0].col   = col;
-	nav_btns[0].width = 2;
-	col += 3;
-	/* <   (width 1) + space */
-	nav_btns[1].col   = col;
-	nav_btns[1].width = 1;
-	col += 2;
-	/* [N/M] */
-	nav_btns[2].col   = col;
-	nav_btns[2].width = pagew;
-	col += pagew + 1;
-	/* >   (width 1) + space */
-	nav_btns[3].col   = col;
-	nav_btns[3].width = 1;
-	col += 2;
-	/* >|  (width 2) */
-	nav_btns[4].col   = col;
-	nav_btns[4].width = 2;
+	nav_btns[0].col = col; nav_btns[0].width = 2; col += 3;
+	nav_btns[1].col = col; nav_btns[1].width = 1; col += 2;
+	nav_btns[2].col = col; nav_btns[2].width = pagew; col += pagew + 1;
+	nav_btns[3].col = col; nav_btns[3].width = 1; col += 2;
+	nav_btns[4].col = col; nav_btns[4].width = 2;
 }
 
-/*
- * Return the nav action for a given status-bar column, or MENU_NONE.
- */
 static int nav_hit(int col)
 {
 	int i;
-	for (i = 0; i < NAV_NBTNS; i++) {
-		if (col >= nav_btns[i].col &&
-		    col <  nav_btns[i].col + nav_btns[i].width)
+	for (i = 0; i < NAV_NBTNS; i++)
+		if (col >= nav_btns[i].col && col < nav_btns[i].col + nav_btns[i].width)
 			return nav_btns[i].action;
-	}
 	return MENU_NONE;
 }
 
-/* Draw just the navigation buttons onto the already-reverse-video status bar. */
 static void nav_draw(void)
 {
 	char pagebuf[32];
 	int i;
-
 	snprintf(pagebuf, sizeof(pagebuf), "[%d/%d]", s_page, s_pages);
-
 	for (i = 0; i < NAV_NBTNS; i++) {
 		const char *label = (i == 2) ? pagebuf : nav_labels[i];
-		mvprintw(STATUSBAR_ROW, nav_btns[i].col, "%s", label);
+		mvwprintw(s_win, STATUSBAR_ROW, nav_btns[i].col, "%s", label);
 	}
 }
 
@@ -148,10 +162,6 @@ static void nav_draw(void)
  * Internal helpers
  * ---------------------------------------------------------------------- */
 
-/*
- * Return which top-level menu index the given column falls on, or -1.
- * Each menu title occupies [col, col + strlen(title)).
- */
 static int bar_hit(int col)
 {
 	int i;
@@ -163,104 +173,88 @@ static int bar_hit(int col)
 	return -1;
 }
 
+/* Draw the status bar into row 0 of s_win and flush only that row. */
 static void bar_draw(int highlight)
 {
-	int i;
-	attron(A_REVERSE);
-	move(STATUSBAR_ROW, 0);
-	clrtoeol();
-	/* Menu titles */
+	int i, cols;
+
+	if (!s_win) return;
+	cols = getmaxx(s_win);
+
+	wattron(s_win, A_REVERSE);
+	wmove(s_win, STATUSBAR_ROW, 0);
+	wclrtoeol(s_win);
 	for (i = 0; i < NMENUS; i++) {
-		if (i == highlight)
-			attroff(A_REVERSE);
-		mvprintw(STATUSBAR_ROW, menus[i].col, "%s", menus[i].title);
-		if (i == highlight)
-			attron(A_REVERSE);
+		if (i == highlight) wattroff(s_win, A_REVERSE);
+		mvwprintw(s_win, STATUSBAR_ROW, menus[i].col, "%s", menus[i].title);
+		if (i == highlight) wattron(s_win, A_REVERSE);
 	}
-	/* Navigation buttons */
 	nav_draw();
-	/* File info right-aligned */
 	{
 		char info[320];
-		int infolen, cols;
-		cols = getmaxx(stdscr);
+		int infolen;
 		snprintf(info, sizeof(info), " %s  zoom %d%% ", s_filename, s_zoom);
 		infolen = (int)strlen(info);
 		if (infolen < cols)
-			mvprintw(STATUSBAR_ROW, cols - infolen, "%s", info);
+			mvwprintw(s_win, STATUSBAR_ROW, cols - infolen, "%s", info);
 	}
-	attroff(A_REVERSE);
-	refresh();
+	wattroff(s_win, A_REVERSE);
+	win_flush();
 }
 
-/* Returns the width of the widest item label in a menu. */
 static int dropdown_width(const Menu *m)
 {
 	int i, w = 0;
 	for (i = 0; i < m->nitems; i++) {
 		int l = (int)strlen(m->items[i].label);
-		if (l > w)
-			w = l;
+		if (l > w) w = l;
 	}
-	return w + 2;	/* 1-char padding each side */
+	return w + 2;
 }
 
 /*
  * Show a drop-down for menu m, pre-selecting item sel.
  * Returns the chosen action, or MENU_NONE if cancelled.
  * Returns -KEY_LEFT / -KEY_RIGHT to signal switching to adjacent menu.
- *
- * Draws directly onto stdscr to avoid newwin/delwin — on a Linux
- * framebuffer console, direct mmap writes leave ncurses' window-list
- * state inconsistent, and delwin() on a WINDOW created after such writes
- * can corrupt internal ncurses structures and segfault.
  */
 static int dropdown_run(const Menu *m, int sel)
 {
 	int w = dropdown_width(m);
-	int h = m->nitems + 2;	/* border top + items + border bottom */
+	int h = m->nitems + 2;
 	int dcol = m->col;
 	int i, c;
 
-	/* Guard against zero/negative terminal dimensions (can happen on a
-	 * framebuffer console before the terminal size is properly set). */
 	if (LINES < DROPDOWN_ROW + h || COLS < dcol + w)
 		return MENU_NONE;
 
-	/* Force full repaint of stdscr before drawing the dropdown.
-	 * Direct framebuffer writes leave ncurses' screen model stale. */
-	clearok(stdscr, TRUE);
+	/* Grow s_win to cover the status bar + dropdown rows. */
+	win_resize(DROPDOWN_ROW + h);
 
 	while (1) {
-		/* Redraw the bar and then paint the dropdown over it on stdscr. */
 		bar_draw(-1);
+
 		/* Top border */
-		move(DROPDOWN_ROW, dcol);
-		addch(ACS_ULCORNER);
-		for (i = 1; i < w - 1; i++) addch(ACS_HLINE);
-		addch(ACS_URCORNER);
+		mvwaddch(s_win, DROPDOWN_ROW, dcol, ACS_ULCORNER);
+		for (i = 1; i < w - 1; i++) waddch(s_win, ACS_HLINE);
+		waddch(s_win, ACS_URCORNER);
 		/* Items */
 		for (i = 0; i < m->nitems; i++) {
-			move(DROPDOWN_ROW + 1 + i, dcol);
-			addch(ACS_VLINE);
-			if (i == sel) attron(A_REVERSE);
-			printw("%s", m->items[i].label);
-			if (i == sel) attroff(A_REVERSE);
-			/* pad to width */
-			{
-				int cur = (int)strlen(m->items[i].label) + 1;
-				while (cur < w - 1) { addch(' '); cur++; }
-			}
-			addch(ACS_VLINE);
+			int cur;
+			mvwaddch(s_win, DROPDOWN_ROW + 1 + i, dcol, ACS_VLINE);
+			if (i == sel) wattron(s_win, A_REVERSE);
+			wprintw(s_win, "%s", m->items[i].label);
+			if (i == sel) wattroff(s_win, A_REVERSE);
+			cur = (int)strlen(m->items[i].label) + 1;
+			while (cur < w - 1) { waddch(s_win, ' '); cur++; }
+			waddch(s_win, ACS_VLINE);
 		}
 		/* Bottom border */
-		move(DROPDOWN_ROW + h - 1, dcol);
-		addch(ACS_LLCORNER);
-		for (i = 1; i < w - 1; i++) addch(ACS_HLINE);
-		addch(ACS_LRCORNER);
-		refresh();
+		mvwaddch(s_win, DROPDOWN_ROW + h - 1, dcol, ACS_LLCORNER);
+		for (i = 1; i < w - 1; i++) waddch(s_win, ACS_HLINE);
+		waddch(s_win, ACS_LRCORNER);
+		win_flush();
 
-		c = getch();
+		c = wgetch(stdscr);
 		switch (c) {
 		case KEY_UP:
 			sel = (sel + m->nitems - 1) % m->nitems;
@@ -269,45 +263,45 @@ static int dropdown_run(const Menu *m, int sel)
 			sel = (sel + 1) % m->nitems;
 			break;
 		case '\n': case '\r': case KEY_ENTER:
+			win_resize(MENU_ROWS_IDLE);
 			return m->items[sel].action;
 		case KEY_LEFT:
+			win_resize(MENU_ROWS_IDLE);
 			return -KEY_LEFT;
 		case KEY_RIGHT:
+			win_resize(MENU_ROWS_IDLE);
 			return -KEY_RIGHT;
 		case 27:
+			win_resize(MENU_ROWS_IDLE);
 			return MENU_NONE;
 		case KEY_MOUSE: {
 			MEVENT ev;
-			if (getmouse(&ev) != OK)
-				break;
-			/* Click on the status bar — switch to that menu or close. */
-			if (ev.y == STATUSBAR_ROW &&
-			    (ev.bstate & BUTTON1_PRESSED)) {
+			if (getmouse(&ev) != OK) break;
+			if (ev.y == STATUSBAR_ROW && (ev.bstate & BUTTON1_PRESSED)) {
 				int hit = bar_hit(ev.x);
+				win_resize(MENU_ROWS_IDLE);
 				if (hit >= 0 && hit != (int)(m - menus))
 					return -(KEY_RIGHT * 100 + hit);
 				return MENU_NONE;
 			}
-			/* Click inside the drop-down content area. */
 			if (ev.bstate & BUTTON1_PRESSED) {
 				int item = ev.y - DROPDOWN_ROW - 1;
 				if (ev.x >= dcol && ev.x < dcol + w &&
 				    item >= 0 && item < m->nitems) {
 					sel = item;
-					if (ev.bstate & BUTTON1_DOUBLE_CLICKED)
+					if (ev.bstate & BUTTON1_DOUBLE_CLICKED) {
+						win_resize(MENU_ROWS_IDLE);
 						return m->items[sel].action;
+					}
+				} else if (ev.y > STATUSBAR_ROW) {
+					win_resize(MENU_ROWS_IDLE);
+					return MENU_NONE;
 				}
 			}
-			/* Scroll wheel inside the drop-down moves the highlight. */
 			if (ev.bstate & BUTTON4_PRESSED)
 				sel = (sel + m->nitems - 1) % m->nitems;
 			if (ev.bstate & BUTTON5_PRESSED)
 				sel = (sel + 1) % m->nitems;
-			/* Click outside the menu area entirely — close. */
-			if ((ev.bstate & BUTTON1_PRESSED) &&
-			    ev.y > STATUSBAR_ROW &&
-			    (ev.x < dcol || ev.x >= dcol + w))
-				return MENU_NONE;
 			break;
 		}
 		default:
@@ -319,28 +313,24 @@ static int dropdown_run(const Menu *m, int sel)
 /*
  * Prompt the user for a single line of text.
  * Returns 1 if confirmed, 0 if cancelled.
- *
- * Draws directly onto stdscr to avoid newwin/delwin (same reason as
- * dropdown_run: delwin is unsafe after direct framebuffer mmap writes).
  */
 static int input_dialog(const char *prompt, char *buf, int bufsz)
 {
-	int rows, cols;
+	int scr_rows, scr_cols;
 	int w, h, dr, dc;
-	int ch, len, i;
-	int plen;
+	int ch, len, i, plen;
 
-	getmaxyx(stdscr, rows, cols);
+	getmaxyx(stdscr, scr_rows, scr_cols);
 	plen = (int)strlen(prompt);
 	w = plen + bufsz + 4;
-	if (w > cols - 4)
-		w = cols - 4;
+	if (w > scr_cols - 4) w = scr_cols - 4;
 	h = 3;
-	dr = rows / 2 - 1;
-	dc = (cols - w) / 2;
+	dr = scr_rows / 2 - 1;
+	dc = (scr_cols - w) / 2;
 
-	/* Force full repaint so framebuffer writes don't leave stale state. */
-	clearok(stdscr, TRUE);
+	/* Grow s_win to reach the bottom of the dialog box. */
+	win_resize(dr + h);
+
 	echo();
 	curs_set(1);
 
@@ -348,36 +338,28 @@ static int input_dialog(const char *prompt, char *buf, int bufsz)
 	len = 0;
 
 	while (1) {
-		/* Draw dialog box on stdscr each iteration. */
-		move(dr, dc);
-		addch(ACS_ULCORNER);
-		for (i = 1; i < w - 1; i++) addch(ACS_HLINE);
-		addch(ACS_URCORNER);
+		/* Draw dialog box rows into s_win. */
+		mvwaddch(s_win, dr, dc, ACS_ULCORNER);
+		for (i = 1; i < w - 1; i++) waddch(s_win, ACS_HLINE);
+		waddch(s_win, ACS_URCORNER);
 
-		move(dr + 1, dc);
-		addch(ACS_VLINE);
-		printw(" %s%-*s", prompt, w - plen - 3, buf);
-		addch(ACS_VLINE);
+		mvwaddch(s_win, dr + 1, dc, ACS_VLINE);
+		wprintw(s_win, " %s%-*s", prompt, w - plen - 3, buf);
+		waddch(s_win, ACS_VLINE);
 
-		move(dr + 2, dc);
-		addch(ACS_LLCORNER);
-		for (i = 1; i < w - 1; i++) addch(ACS_HLINE);
-		addch(ACS_LRCORNER);
+		mvwaddch(s_win, dr + 2, dc, ACS_LLCORNER);
+		for (i = 1; i < w - 1; i++) waddch(s_win, ACS_HLINE);
+		waddch(s_win, ACS_LRCORNER);
 
-		/* Position cursor after prompt + current input. */
-		move(dr + 1, dc + 1 + plen + 1 + len);
-		refresh();
+		wmove(s_win, dr + 1, dc + 1 + plen + 1 + len);
+		win_flush();
 
-		ch = getch();
+		ch = wgetch(stdscr);
 		if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
 			buf[len] = '\0';
 			break;
 		}
-		if (ch == 27) {
-			buf[0] = '\0';
-			len = 0;
-			break;
-		}
+		if (ch == 27) { buf[0] = '\0'; len = 0; break; }
 		if ((ch == KEY_BACKSPACE || ch == 127 || ch == '\b') && len > 0) {
 			len--;
 			buf[len] = '\0';
@@ -389,12 +371,12 @@ static int input_dialog(const char *prompt, char *buf, int bufsz)
 
 	noecho();
 	curs_set(0);
+	win_resize(MENU_ROWS_IDLE);
 	return len > 0;
 }
 
 /*
  * Dispatch an action that may need a text-input dialog.
- * Returns the final action to report to the caller, or MENU_NONE.
  */
 static int dispatch_action(int action, char *buf, int bufsz)
 {
@@ -418,25 +400,16 @@ static int dispatch_action(int action, char *buf, int bufsz)
 
 /*
  * Run the interactive menu bar starting at menu index start_menu.
- * Returns an action, or MENU_NONE if cancelled.
- * Writes into buf for actions that return a string.
  */
 static int menubar_run(int start_menu, char *buf, int bufsz)
 {
 	int cur = start_menu;
 	int action;
 
-	/*
-	 * On a framebuffer console, direct mmap writes to /dev/fb0 leave
-	 * ncurses' internal screen model stale.  Force a full repaint so
-	 * subsequent wrefresh() calls don't try to apply a delta against
-	 * a screen image that no longer exists.
-	 */
-	clearok(stdscr, TRUE);
 	bar_draw(cur);
 
 	while (1) {
-		int c = getch();
+		int c = wgetch(stdscr);
 
 		switch (c) {
 		case KEY_RIGHT:
@@ -450,7 +423,6 @@ static int menubar_run(int start_menu, char *buf, int bufsz)
 		case '\n': case '\r': case KEY_ENTER: case KEY_DOWN:
 open_dropdown:
 			action = dropdown_run(&menus[cur], 0);
-			/* dropdown_run encodes "switch to menu N" as -(KEY_RIGHT*100+N) */
 			if (action <= -(KEY_RIGHT * 100)) {
 				cur = -(action + KEY_RIGHT * 100);
 				bar_draw(cur);
@@ -472,34 +444,28 @@ open_dropdown:
 			}
 			bar_draw(-1);
 			return dispatch_action(action, buf, bufsz);
-		case 27: /* Escape */
+		case 27:
 			bar_draw(-1);
 			return MENU_NONE;
 		case KEY_MOUSE: {
 			MEVENT ev;
-			if (getmouse(&ev) != OK)
-				break;
-			if (ev.y == STATUSBAR_ROW &&
-			    (ev.bstate & BUTTON1_PRESSED)) {
+			if (getmouse(&ev) != OK) break;
+			if (ev.y == STATUSBAR_ROW && (ev.bstate & BUTTON1_PRESSED)) {
 				int hit = bar_hit(ev.x);
 				if (hit >= 0) {
 					cur = hit;
 					bar_draw(cur);
 					goto open_dropdown;
 				}
-				/* Check nav buttons */
 				action = nav_hit(ev.x);
 				if (action != MENU_NONE) {
 					bar_draw(-1);
 					return dispatch_action(action, buf, bufsz);
 				}
-				/* Clicked the info area — close menu. */
 				bar_draw(-1);
 				return MENU_NONE;
 			}
-			/* Click outside the bar while no dropdown is open — close. */
-			if (ev.y != STATUSBAR_ROW &&
-			    (ev.bstate & BUTTON1_PRESSED)) {
+			if (ev.y != STATUSBAR_ROW && (ev.bstate & BUTTON1_PRESSED)) {
 				bar_draw(-1);
 				return MENU_NONE;
 			}
@@ -522,69 +488,53 @@ void menu_init(void)
 	noecho();
 	curs_set(0);
 	keypad(stdscr, TRUE);
-	/*
-	 * Enable mouse support. On a Linux framebuffer console this
-	 * automatically uses GPM if the daemon is running.
-	 * REPORT_MOUSE_POSITION delivers motion events while button-1 is
-	 * held, enabling drag-to-pan.
-	 */
-	/*
-	 * Use mouseinterval(0) to suppress ncurses' click synthesis — without
-	 * it, a single physical click generates both BUTTON1_PRESSED and a
-	 * synthesized BUTTON1_CLICKED, causing every click to be processed
-	 * twice and corrupting the window list (double delwin).
-	 * With mouseinterval(0), ncurses delivers only BUTTON1_PRESSED +
-	 * BUTTON1_RELEASED. GPM delivers BUTTON1_CLICKED directly (no
-	 * synthesis) so it continues to work correctly.
-	 */
 	mouseinterval(0);
 	mousemask(BUTTON1_PRESSED | BUTTON1_RELEASED |
 	          BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED | BUTTON2_PRESSED |
 	          BUTTON4_PRESSED | BUTTON5_PRESSED |
 	          REPORT_MOUSE_POSITION, NULL);
+
+	nav_layout();
+	win_resize(MENU_ROWS_IDLE);
 }
 
 void menu_cleanup(void)
 {
+	if (s_win) { delwin(s_win); s_win = NULL; }
 	endwin();
 }
 
 void menu_statusbar(const char *filename, int page, int pages, int zoom)
 {
-	int cols = getmaxx(stdscr);
+	int cols;
 	int changed_pages = (pages != s_pages);
-
-	/* Framebuffer mmap writes leave ncurses' screen model stale.
-	 * Force a full repaint so refresh() doesn't corrupt window state. */
-	clearok(stdscr, TRUE);
 
 	snprintf(s_filename, sizeof(s_filename), "%s", filename);
 	s_page  = page;
 	s_pages = pages;
 	s_zoom  = zoom;
 
-	/* Recompute nav layout if page count changed (box width may shift). */
 	if (changed_pages)
 		nav_layout();
 
-	attron(A_REVERSE);
-	move(STATUSBAR_ROW, 0);
-	clrtoeol();
-	/* Menu titles */
-	mvprintw(STATUSBAR_ROW, 0, " File  View ");
-	/* Navigation buttons */
+	if (!s_win) return;
+	cols = getmaxx(s_win);
+
+	wattron(s_win, A_REVERSE);
+	wmove(s_win, STATUSBAR_ROW, 0);
+	wclrtoeol(s_win);
+	mvwprintw(s_win, STATUSBAR_ROW, 0, " File  View ");
 	nav_draw();
-	/* File info right-aligned */
 	{
 		char info[320];
 		int infolen;
 		snprintf(info, sizeof(info), " %s  zoom %d%% ", filename, zoom);
 		infolen = (int)strlen(info);
 		if (infolen < cols)
-			mvprintw(STATUSBAR_ROW, cols - infolen, "%s", info);
+			mvwprintw(s_win, STATUSBAR_ROW, cols - infolen, "%s", info);
 	}
-	attroff(A_REVERSE);
-	refresh();
+	wattroff(s_win, A_REVERSE);
+	win_flush();
 }
 
 int menu_open(char *buf, int bufsz)
@@ -601,7 +551,6 @@ int menu_handle_key(int key, char *buf, int bufsz, MenuMouse *mm)
 		if (getmouse(&ev) != OK)
 			return MENU_NONE;
 
-		/* ---- Status bar row: menus, nav buttons ---- */
 		if (ev.y == STATUSBAR_ROW) {
 			if (ev.bstate & BUTTON1_PRESSED) {
 				int hit = bar_hit(ev.x);
@@ -616,32 +565,13 @@ int menu_handle_key(int key, char *buf, int bufsz, MenuMouse *mm)
 			return MENU_NONE;
 		}
 
-		/* ---- Document area ---- */
-		if (mm) {
-			mm->row = ev.y;
-			mm->col = ev.x;
-		}
-		/* Middle-click zooms in; ctrl+scroll not reliably detectable
-		 * in all terminals, so middle-click = zoom in, right-click
-		 * (button3) = zoom out is the portable fallback. */
-		if (ev.bstate & BUTTON2_PRESSED)
-			return MENU_MOUSE_ZOOM_IN;
-		/* Scroll wheel scrolls within the page. */
-		if (ev.bstate & BUTTON4_PRESSED)
-			return MENU_SCROLL_UP;
-		if (ev.bstate & BUTTON5_PRESSED)
-			return MENU_SCROLL_DOWN;
-		/* Drag-to-pan: press, motion, release. */
-		if (ev.bstate & BUTTON1_PRESSED)
-			return MENU_MOUSE_PRESS;
-		if (ev.bstate & BUTTON1_RELEASED)
-			return MENU_MOUSE_RELEASE;
-		/* Motion events arrive as REPORT_MOUSE_POSITION with no button
-		 * bits set in some terminals, or with BUTTON1_PRESSED still set
-		 * in others. Treat any motion on the document row as a drag. */
-		if (ev.bstate & BUTTON1_DOUBLE_CLICKED)
-			return MENU_MOUSE_ZOOM_IN;
-		/* Pure motion (button held, position report) */
+		if (mm) { mm->row = ev.y; mm->col = ev.x; }
+		if (ev.bstate & BUTTON2_PRESSED)   return MENU_MOUSE_ZOOM_IN;
+		if (ev.bstate & BUTTON4_PRESSED)   return MENU_SCROLL_UP;
+		if (ev.bstate & BUTTON5_PRESSED)   return MENU_SCROLL_DOWN;
+		if (ev.bstate & BUTTON1_PRESSED)   return MENU_MOUSE_PRESS;
+		if (ev.bstate & BUTTON1_RELEASED)  return MENU_MOUSE_RELEASE;
+		if (ev.bstate & BUTTON1_DOUBLE_CLICKED) return MENU_MOUSE_ZOOM_IN;
 		if (ev.bstate == REPORT_MOUSE_POSITION ||
 		    (ev.bstate & BUTTON1_PRESSED))
 			return MENU_MOUSE_DRAG;
@@ -651,6 +581,6 @@ int menu_handle_key(int key, char *buf, int bufsz, MenuMouse *mm)
 
 int menu_readkey(void)
 {
-	int c = getch();
+	int c = wgetch(stdscr);
 	return c == ERR ? -1 : c;
 }
