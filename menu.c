@@ -218,6 +218,11 @@ static int dropdown_run(const Menu *m, int sel)
 	WINDOW *win;
 	int i, c;
 
+	/* Guard against zero/negative terminal dimensions (can happen on a
+	 * framebuffer console before the terminal size is properly set). */
+	if (LINES < DROPDOWN_ROW + h || COLS < dcol + w)
+		return MENU_NONE;
+
 	win = newwin(h, w, DROPDOWN_ROW, dcol);
 	if (!win)
 		return MENU_NONE;
@@ -261,7 +266,7 @@ static int dropdown_run(const Menu *m, int sel)
 				break;
 			/* Click on the status bar — switch to that menu or close. */
 			if (ev.y == STATUSBAR_ROW &&
-			    (ev.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED))) {
+			    (ev.bstate & BUTTON1_PRESSED)) {
 				int hit = bar_hit(ev.x);
 				delwin(win);
 				if (hit >= 0 && hit != (int)(m - menus))
@@ -270,7 +275,7 @@ static int dropdown_run(const Menu *m, int sel)
 				return MENU_NONE;
 			}
 			/* Click inside the drop-down content area. */
-			if (ev.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED)) {
+			if (ev.bstate & BUTTON1_PRESSED) {
 				int item = ev.y - DROPDOWN_ROW - 1;
 				if (ev.x >= dcol && ev.x < dcol + w &&
 				    item >= 0 && item < m->nitems) {
@@ -287,7 +292,7 @@ static int dropdown_run(const Menu *m, int sel)
 			if (ev.bstate & BUTTON5_PRESSED)
 				sel = (sel + 1) % m->nitems;
 			/* Click outside the menu area entirely — close. */
-			if ((ev.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED)) &&
+			if ((ev.bstate & BUTTON1_PRESSED) &&
 			    ev.y > STATUSBAR_ROW &&
 			    (ev.x < dcol || ev.x >= dcol + w)) {
 				delwin(win);
@@ -455,7 +460,7 @@ open_dropdown:
 			if (getmouse(&ev) != OK)
 				break;
 			if (ev.y == STATUSBAR_ROW &&
-			    (ev.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED))) {
+			    (ev.bstate & BUTTON1_PRESSED)) {
 				int hit = bar_hit(ev.x);
 				if (hit >= 0) {
 					cur = hit;
@@ -474,7 +479,7 @@ open_dropdown:
 			}
 			/* Click outside the bar while no dropdown is open — close. */
 			if (ev.y != STATUSBAR_ROW &&
-			    (ev.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED))) {
+			    (ev.bstate & BUTTON1_PRESSED)) {
 				bar_draw(-1);
 				return MENU_NONE;
 			}
@@ -503,7 +508,7 @@ void menu_init(void)
 	 * REPORT_MOUSE_POSITION delivers motion events while button-1 is
 	 * held, enabling drag-to-pan.
 	 */
-	mousemask(BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_RELEASED |
+	mousemask(BUTTON1_PRESSED | BUTTON1_RELEASED |
 	          BUTTON1_DOUBLE_CLICKED | BUTTON2_PRESSED |
 	          BUTTON4_PRESSED | BUTTON5_PRESSED |
 	          REPORT_MOUSE_POSITION, NULL);
@@ -564,7 +569,7 @@ int menu_handle_key(int key, char *buf, int bufsz, MenuMouse *mm)
 
 		/* ---- Status bar row: menus, nav buttons ---- */
 		if (ev.y == STATUSBAR_ROW) {
-			if (ev.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED)) {
+			if (ev.bstate & BUTTON1_PRESSED) {
 				int hit = bar_hit(ev.x);
 				if (hit >= 0)
 					return menubar_run(hit, buf, bufsz);
